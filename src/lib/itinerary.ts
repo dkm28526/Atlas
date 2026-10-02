@@ -78,7 +78,13 @@ export function buildItinerary(input: TripInput): Itinerary {
   const ordered = orderCities(input.cityIds);
 
   // --- 2. Demand decides the nights ---
-  const allocation = allocateNights(ordered, totalNights, input.interests, input.pace);
+  const allocation = allocateNights(
+    ordered,
+    totalNights,
+    input.interests,
+    input.pace,
+    input.nightsOverride ?? {},
+  );
   const cityIds = ordered.filter((id) => allocation.cityIds.includes(id));
 
   if (allocation.dropped.length > 0) {

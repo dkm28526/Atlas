@@ -103,6 +103,12 @@ export interface TripInput {
   interests: Category[];
   pace: Pace;
   travelerStyle: TravelerStyle;
+  /**
+   * Nights the traveller has pinned by hand, by city id. The allocator honours
+   * these and shares what is left among the rest, so nudging one city visibly
+   * costs another — which is the real tradeoff in a fixed-length trip.
+   */
+  nightsOverride?: Record<string, number>;
 }
 
 export type HopMode = "flight" | "train" | "bus";

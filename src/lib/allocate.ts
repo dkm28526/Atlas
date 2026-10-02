@@ -69,6 +69,7 @@ export function allocateNights(
   totalNights: number,
   interests: Category[],
   pace: Pace,
+  overrides: Record<string, number> = {},
 ): Allocation {
   const demand = new Map(
     orderedCityIds.map((id) => [id, Math.max(0.5, cityDemandDays(id, interests, pace))]),
@@ -91,14 +92,41 @@ export function allocateNights(
     cityIds = cityIds.filter((id) => id !== worst);
   }
 
+  // Pinned cities keep what the traveller asked for; everyone else starts at
+  // one night and competes for the remainder.
+  const pinned = new Set<string>();
   const nights: Record<string, number> = {};
-  for (const id of cityIds) nights[id] = 1;
+  for (const id of cityIds) {
+    const override = overrides[id];
+    if (typeof override === "number" && Number.isFinite(override)) {
+      nights[id] = Math.max(1, Math.round(override));
+      pinned.add(id);
+    } else {
+      nights[id] = 1;
+    }
+  }
 
-  let remaining = Math.max(0, totalNights - cityIds.length);
-  while (remaining > 0) {
-    let best = cityIds[0];
+  const total = () => cityIds.reduce((sum, id) => sum + nights[id], 0);
+
+  // Over-pinned: the pins alone exceed the trip. Trim the biggest first, and
+  // trim pinned cities before free ones so the pins absorb their own cost.
+  while (total() > totalNights) {
+    const trimmable = cityIds.filter((id) => nights[id] > 1);
+    if (trimmable.length === 0) break;
+    const preferred = trimmable.filter((id) => pinned.has(id));
+    const pool = preferred.length > 0 ? preferred : trimmable;
+    let worst = pool[0];
+    for (const id of pool) if (nights[id] > nights[worst]) worst = id;
+    nights[worst] -= 1;
+  }
+
+  // Share out whatever is left, favouring unpinned cities.
+  const free = cityIds.filter((id) => !pinned.has(id));
+  const contenders = free.length > 0 ? free : cityIds;
+  while (total() < totalNights) {
+    let best = contenders[0];
     let bestGap = -Infinity;
-    for (const id of cityIds) {
+    for (const id of contenders) {
       // Unmet demand, normalised so big cities do not simply always win.
       const gap = (demand.get(id) ?? 0) / nights[id];
       const underMin = nights[id] < requireCity(id).minNights ? 1.35 : 1;
@@ -109,7 +137,6 @@ export function allocateNights(
       }
     }
     nights[best] += 1;
-    remaining -= 1;
   }
 
   return { nights, dropped, cityIds };
