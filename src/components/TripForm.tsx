@@ -2,7 +2,8 @@
 
 import { useMemo, useState } from "react";
 
-import { CITIES, searchCities } from "@/lib/cities";
+import { getCity, registerCity, searchCities } from "@/lib/cities";
+import type { ResolvedCity } from "@/lib/resolveCity";
 import { dayCount } from "@/lib/dates";
 import { CATEGORIES, CATEGORY_LABELS } from "@/lib/types";
 import type { Category, Pace, TravelerStyle, TripInput } from "@/lib/types";
@@ -27,8 +28,11 @@ const STYLES: { id: TravelerStyle; label: string }[] = [
 export default function TripForm({ value, onChange }: TripFormProps) {
   const [query, setQuery] = useState("");
 
+  const [resolving, setResolving] = useState(false);
+  const [resolveError, setResolveError] = useState<string | null>(null);
+
   const selected = useMemo(
-    () => value.cityIds.map((id) => CITIES.find((c) => c.id === id)!).filter(Boolean),
+    () => value.cityIds.map((id) => getCity(id)!).filter(Boolean),
     [value.cityIds],
   );
 
@@ -45,7 +49,42 @@ export default function TripForm({ value, onChange }: TripFormProps) {
 
   const addCity = (id: string) => {
     setQuery("");
+    setResolveError(null);
     patch({ cityIds: [...value.cityIds, id] });
+  };
+
+  /**
+   * The local catalogue came up empty — ask the server to resolve it: a
+   * cache hit if someone's asked for this city before, otherwise a fresh
+   * Claude + web-search generation. Either way, register the result into
+   * this browser's own copy of cities.ts so the (synchronous, local)
+   * planner can find it afterward.
+   */
+  const searchOnline = async () => {
+    const raw = query.trim();
+    if (!raw || resolving) return;
+    setResolving(true);
+    setResolveError(null);
+    try {
+      const [name, country] = raw.split(",").map((s) => s.trim());
+      const response = await fetch("/api/city", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, country: country || undefined }),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        setResolveError(data.error ?? "Couldn't look that city up.");
+        return;
+      }
+      const resolved = data as ResolvedCity;
+      registerCity(resolved.city, resolved.activities, resolved.lodging);
+      addCity(resolved.city.id);
+    } catch {
+      setResolveError("Couldn't reach the planner. Is the dev server still running?");
+    } finally {
+      setResolving(false);
+    }
   };
 
   const removeCity = (id: string) => {
@@ -124,7 +163,13 @@ export default function TripForm({ value, onChange }: TripFormProps) {
         <div className="relative">
           <input
             value={query}
-            onChange={(e) => setQuery(e.target.value)}
+            onChange={(e) => {
+              setQuery(e.target.value);
+              setResolveError(null);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && results.length === 0) searchOnline();
+            }}
             placeholder="Add a city or country…"
             className="w-full rounded-lg border border-edge bg-void px-2.5 py-2 text-xs text-ink placeholder:text-inkDim/70 outline-none focus:border-route"
           />
@@ -143,7 +188,40 @@ export default function TripForm({ value, onChange }: TripFormProps) {
               ))}
             </ul>
           )}
+          {/* No local match — the catalogue isn't a hard limit, it's just
+              what's pre-loaded. Any real city can be looked up on demand. */}
+          {results.length === 0 && query.trim().length >= 2 && (
+            <div className="absolute z-20 mt-1 w-full overflow-hidden rounded-lg border border-edge bg-hull shadow-xl shadow-black/50">
+              <button
+                onClick={searchOnline}
+                disabled={resolving}
+                className="flex w-full items-center gap-2 px-2.5 py-2 text-left text-xs text-route transition hover:bg-panel disabled:opacity-60"
+              >
+                {resolving ? (
+                  <>
+                    <span className="h-3 w-3 shrink-0 animate-spin rounded-full border-[1.5px] border-route/30 border-t-route" />
+                    <span>
+                      Researching &ldquo;{query.trim()}&rdquo;…
+                      <span className="block text-inkDim">
+                        Live web search, can take a minute or two the first time — instant for
+                        everyone after.
+                      </span>
+                    </span>
+                  </>
+                ) : (
+                  <>🔍 Search &ldquo;{query.trim()}&rdquo; online</>
+                )}
+              </button>
+            </div>
+          )}
         </div>
+        {resolveError && (
+          <p className="mt-1.5 text-[11px] text-amber-300">{resolveError}</p>
+        )}
+        <p className="mt-1.5 text-[11px] text-inkDim">
+          Not finding a city? Type its name — add a comma and the country if
+          it&apos;s ambiguous (e.g. &ldquo;Valencia, Spain&rdquo;) — and search online.
+        </p>
       </div>
 
       {/* --- Interests --- */}

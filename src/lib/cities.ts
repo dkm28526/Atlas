@@ -424,7 +424,7 @@ function parseSlots(code: string): Slot[] {
   return out.length > 0 ? out : ["morning", "afternoon"];
 }
 
-const slug = (s: string) =>
+export const slug = (s: string) =>
   s
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
@@ -476,6 +476,14 @@ export const LODGINGS: Lodging[] = Object.entries(LODGING_ROWS).flatMap(
 
 // ---------------------------------------------------------------------------
 // Lookups
+//
+// These Maps start seeded from the static rows above, but are mutable: a
+// city resolved at runtime (geocoded + generated — see resolveCity.ts) is
+// merged in via registerCity() and then behaves identically to a curated
+// one for every lookup here. That's deliberate — it means route.ts,
+// allocate.ts, pack.ts and itinerary.ts, which only ever call these
+// functions and never touch CITIES/ACTIVITIES/LODGINGS directly, need zero
+// changes to support cities that didn't exist in the seed data.
 // ---------------------------------------------------------------------------
 
 const cityById = new Map(CITIES.map((c) => [c.id, c]));
@@ -516,11 +524,33 @@ export function getLodging(cityId: string): Lodging[] {
   return lodgingByCity.get(cityId) ?? [];
 }
 
+/** Every city currently known — static plus whatever's been registered. */
+export function getAllCities(): City[] {
+  return Array.from(cityById.values());
+}
+
 export function searchCities(query: string): City[] {
+  const all = getAllCities();
   const q = query.trim().toLowerCase();
-  if (!q) return CITIES;
-  return CITIES.filter(
+  if (!q) return all;
+  return all.filter(
     (c) =>
       c.name.toLowerCase().includes(q) || c.country.toLowerCase().includes(q),
   );
+}
+
+/**
+ * Merge a resolved city into the live registry — set semantics throughout
+ * (overwrite, not append), so re-registering the same city id is a safe,
+ * idempotent refresh rather than a duplicate.
+ */
+export function registerCity(
+  city: City,
+  activities: Activity[],
+  lodging: Lodging[],
+): void {
+  cityById.set(city.id, city);
+  activitiesByCity.set(city.id, activities);
+  lodgingByCity.set(city.id, lodging);
+  for (const a of activities) activityById.set(a.id, a);
 }

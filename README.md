@@ -18,11 +18,21 @@ npm run dev          # http://localhost:3000
 ```
 
 The app is fully usable with no API key — free-text requests fall back to a
-keyword parser. To have Claude interpret them properly:
+keyword parser, and the city catalogue (below) is limited to the 23 seeded
+cities. To have Claude interpret requests properly and look up any city in
+the world:
 
 ```bash
-echo 'ANTHROPIC_API_KEY=sk-ant-...' > .env.local
+echo 'ANTHROPIC_API_KEY=sk-ant-...' >> .env.local
 ```
+
+The key needs to be scoped to a specific workspace (Console → Settings →
+API Keys → pick a workspace, Default is fine) — an org-level key with no
+workspace attached gets rejected with `anthropic-workspace-id` errors.
+
+For the city cache, nothing else is required locally — it falls back to a
+`.cache/` folder on disk automatically. **Before deploying**, see
+"Deploying" below; the file cache does not survive a serverless deploy.
 
 Other scripts:
 
@@ -120,21 +130,88 @@ Known limitation: a flat map can't show the literal shortest path the way the
 map is visible rather than wrapping the antimeridian — a cosmetic tradeoff of
 the genre (the films' own maps never show that kind of route either).
 
+## Any city, not just the catalogue
+
+The 23 seeded cities (`src/lib/cities.ts`) are a hand-curated quality floor,
+not a hard limit. Any real city can be added — through "🔍 Search online" in
+the trip-setup form when the local list comes up empty, or by just naming it
+in a free-text request ("a week in Hoi An"). Nothing downstream needs to
+know the difference: `route.ts`, `allocate.ts`, `pack.ts` and `itinerary.ts`
+only ever call `getCity`/`getActivities`/`getLodging` — never the static
+`CITIES` array directly — so a resolved city behaves identically to a
+curated one everywhere, including the globe and the adventure map.
+
+**Resolution, cheapest check first** (`src/lib/resolveCity.ts`):
+
+1. Already known this session (static seed, or resolved earlier) — free.
+2. In the persistent cache — free, shared across every user who's ever
+   asked for this city before.
+3. Neither — geocode via OpenStreetMap's Nominatim (free, no key; also
+   doubles as validation — a name that doesn't geocode to anywhere real
+   gets rejected rather than silently built into a trip), then generate via
+   two Claude calls: one researches the city with live web search
+   (`src/lib/generateCity.ts`), the second structures that research into the
+   same City/Activity/Lodging shape the hand-written rows use. The result is
+   written through to the cache and merged into the live registry.
+
+**This is genuinely slow — by design, not by bug.** A cache miss means two
+sequential Claude calls, one of them doing real web research: measured at
+60–110 seconds depending on the city. That's the cost of it being *actually*
+researched rather than guessed from training data. It only happens once per
+city, ever — every request after, from anyone, is a cache hit in well under
+a second. The UI says this plainly rather than pretending to be fast.
+
+**The cache backend** auto-selects based on what's configured
+(`src/lib/cache.ts`), same "upgrade automatically when credentials exist"
+pattern as the Claude key:
+
+- No `UPSTASH_REDIS_REST_URL`/`UPSTASH_REDIS_REST_TOKEN` → a `.cache/`
+  folder on disk. Zero setup, correct for local dev, **does not survive a
+  serverless deploy** (fresh instance, empty disk).
+- Both set → [Upstash Redis](https://upstash.com) — a free-tier, REST-based
+  store that works the same from a serverless function as a long-running
+  server, no platform lock-in (it's just HTTPS calls, works behind any host).
+
+## Deploying
+
+Two things that are easy to miss, both because the city-generation path is
+slow by nature (see above):
+
+1. **Set up Upstash before you deploy**, or every cold start starts the
+   cache over from empty. Create a free database at
+   [upstash.com](https://upstash.com), copy its REST URL and token into your
+   host's environment variables alongside `ANTHROPIC_API_KEY`, and the app
+   switches to it automatically — no code change.
+2. **Raise the function timeout** on `/api/city` and `/api/plan` — both
+   already set `export const maxDuration = 180` in their route files, but
+   the actual ceiling your platform honours depends on your plan (e.g.
+   Vercel's Hobby tier caps well below 180s regardless of what the route
+   requests; Pro/Fluid Compute allows much longer). Check this specifically
+   once deployed — a city generation that gets killed mid-request by the
+   platform's own timeout is the one way this app could still fail to
+   service a city.
+
 ## Layout
 
 ```
 src/
-  app/            layout, page, globals.css, api/plan (free-text route)
+  app/
+    api/plan/     free-text trip requests (Claude + any-city resolution)
+    api/city/     resolve one city by name (used by TripForm's search-online)
   components/     Globe, AdventureMap, TripForm, ItineraryList
   lib/
     types.ts            domain model
-    cities.ts            seed data — 23 cities, ~150 activities, 69 lodgings
+    cities.ts            seed data (23 cities) + the live, mutable registry
     geo.ts                haversine, great-circle interpolation, hop modes
     route.ts              city ordering
     allocate.ts           night allocation
     pack.ts               day packing
     itinerary.ts          orchestration, lodging ranking, warnings
     llm.ts                Claude (structured outputs) + keyword fallback
+    resolveCity.ts         any-city resolution: registry → cache → generate
+    generateCity.ts         the Claude research → structure pipeline
+    geocode.ts              free Nominatim geocoding, no key
+    cache.ts                Upstash/file cache, auto-selected
     dates.ts              ISO date helpers
     worldmap-data.ts      generated — baked land path + projection (do not edit)
 scripts/
@@ -144,7 +221,18 @@ scripts/
 
 ## Known gaps
 
-- Data is hand-curated and offline — no live prices, availability or booking.
+- Data is hand-curated for the 23 seed cities, Claude-generated-and-cached
+  for everything else — neither is live. No real prices, availability or
+  booking, for either kind of city.
 - Lodging suggestions are static picks, not search results.
 - No manual reordering of cities; the route is always geography-optimised.
 - Hop durations are modelled, not looked up from real timetables.
+- A city name that's genuinely ambiguous without a country ("Springfield",
+  "San Jose") may resolve to the wrong place — pass the country to
+  disambiguate (the UI prompts for this).
+- No retry on a failed generation (web search comes up empty, or the
+  structuring call doesn't parse) — it surfaces as an error rather than
+  silently falling back to something worse; trying again usually works.
+- Generated cities aren't reviewed by a person before being cached and
+  served to the next user who asks — worth knowing before pointing this at
+  real traffic.

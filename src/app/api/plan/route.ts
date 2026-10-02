@@ -4,6 +4,10 @@ import { buildItinerary, PlanError } from "@/lib/itinerary";
 import { interpretTripRequest } from "@/lib/llm";
 
 export const runtime = "nodejs";
+// A free-text request can name cities outside the static catalogue, each
+// resolved in parallel via the same path as /api/city — same reasoning on
+// the duration cap applies here (see that route's comment).
+export const maxDuration = 180;
 
 /**
  * Free-text entry point: "three weeks in Japan and Thailand, food and temples".
@@ -37,6 +41,11 @@ export async function POST(request: Request) {
       itinerary,
       source: interpretation.source,
       notes: interpretation.notes,
+      // Bundles for any city this request resolved beyond the static
+      // catalogue — this route's registerCity() calls only affected this
+      // Node process's module instance, not the browser's, so the client
+      // registers these itself before touching the itinerary further.
+      resolvedCities: interpretation.resolvedCities,
     });
   } catch (error) {
     if (error instanceof PlanError) {

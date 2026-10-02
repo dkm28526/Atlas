@@ -6,7 +6,7 @@ import AdventureMap from "@/components/AdventureMap";
 import Globe, { type GlobeHop, type GlobeStop } from "@/components/Globe";
 import ItineraryList from "@/components/ItineraryList";
 import TripForm from "@/components/TripForm";
-import { requireCity } from "@/lib/cities";
+import { registerCity, requireCity } from "@/lib/cities";
 import { addDays, todayISO } from "@/lib/dates";
 import { buildItinerary, PlanError } from "@/lib/itinerary";
 import type { Itinerary, TripInput } from "@/lib/types";
@@ -126,6 +126,13 @@ export default function Page() {
       if (!response.ok) {
         setRequestError(data.error ?? "That request did not work.");
         return;
+      }
+      // The server resolved any non-catalogue city in its own Node process —
+      // that registration doesn't reach the browser's module instance, so
+      // mirror it here before the client-side planner (buildItinerary, which
+      // runs locally for every later adjustment) needs to look those cities up.
+      for (const resolved of data.resolvedCities ?? []) {
+        registerCity(resolved.city, resolved.activities, resolved.lodging);
       }
       setInput(data.itinerary.input);
       setNote(data.notes ?? null);

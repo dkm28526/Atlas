@@ -4,25 +4,34 @@ import { z } from "zod";
 
 import { CITIES, getCity } from "./cities";
 import { addDays, isValidISO, todayISO } from "./dates";
+import { resolveCity, UnknownCityError, type ResolvedCity } from "./resolveCity";
 import { CATEGORIES } from "./types";
 import type { Category, Pace, TravelerStyle, TripInput } from "./types";
 
-const CITY_IDS = CITIES.map((c) => c.id) as [string, ...string[]];
 const CATEGORY_IDS = CATEGORIES as [Category, ...Category[]];
 
 /**
- * What we ask the model for. Constraining `cityIds` to an enum of ids we
- * actually have data for is the important part — it makes a hallucinated
- * destination a schema violation rather than a runtime surprise.
+ * What we ask the model for.
+ *
+ * Cities are free-form name+country pairs, not a closed enum — the whole
+ * point of this module is that a trip isn't limited to a fixed catalogue.
+ * The thing that used to make a hallucinated destination impossible (the
+ * enum) is replaced by a real check downstream: resolveCity() geocodes each
+ * name, and a place that doesn't geocode to anything real is dropped rather
+ * than silently built into the trip.
  */
 const TripRequestSchema = z.object({
   startDate: z.string().describe("Trip start, ISO yyyy-mm-dd."),
   endDate: z.string().describe("Trip end, ISO yyyy-mm-dd, inclusive."),
-  cityIds: z
-    .array(z.enum(CITY_IDS))
-    .describe(
-      "Cities to visit, chosen only from the catalogue. Put the arrival city first.",
-    ),
+  cities: z
+    .array(
+      z.object({
+        name: z.string().describe("The city's common English name."),
+        country: z.string().describe("Helps disambiguate — e.g. which 'Springfield'."),
+      }),
+    )
+    .min(1)
+    .describe("Cities to visit, any real place. Put the arrival city first."),
   interests: z.array(z.enum(CATEGORY_IDS)).describe("Activity categories to favour."),
   pace: z.enum(["relaxed", "balanced", "packed"]),
   travelerStyle: z.enum(["budget", "mid", "comfort"]),
@@ -35,6 +44,15 @@ export interface Interpretation {
   input: TripInput;
   source: "claude" | "heuristic";
   notes: string;
+  /**
+   * Full city/activity/lodging bundles for every non-catalogue city this
+   * request touched — the caller (the /api/plan route) attaches these to
+   * its response so the browser can register them into its own in-memory
+   * copy of cities.ts before running the client-side planner on them.
+   */
+  resolvedCities: ResolvedCity[];
+  /** Named cities that didn't geocode to anywhere real and were dropped. */
+  unresolvedCityNames: string[];
 }
 
 const SYSTEM = `You turn a traveller's free-text request into a structured trip brief.
@@ -49,15 +67,20 @@ places shallowly. Apply that bias:
   the traveller clearly asked for it or the trip is three weeks or more.
 - Put the city the traveller would realistically fly into first.
 
-Only choose cities from the catalogue you are given. If the traveller names a
-place that is not in it, pick the closest listed city and say so in your notes.
+Name any real city in the world — you are not limited to a fixed list. That
+said, these cities already have the richest hand-curated detail in the
+system, so prefer one of them when it serves the request equally well:
+${catalogueNames()}
+
+Give each city's common English name and its country, accurately enough to
+geocode — that is how a nonexistent or misspelled place gets caught.
 
 If no dates are given, start the trip four weeks from today and make it as long
 as the traveller implies ("a couple of weeks" = 14 days). Resolve all relative
 dates against the current date you are given.`;
 
-function catalogue(): string {
-  return CITIES.map((c) => `${c.id} — ${c.name}, ${c.country}`).join("\n");
+function catalogueNames(): string {
+  return CITIES.map((c) => `${c.name}, ${c.country}`).join("; ");
 }
 
 /**
@@ -65,19 +88,22 @@ function catalogue(): string {
  *
  * Uses Claude when credentials are available and falls back to a keyword
  * parser otherwise, so the app is fully usable with no API key — the same
- * shape of answer either way.
+ * shape of answer either way. The keyword fallback only matches the static
+ * catalogue (it has no way to geocode or generate), which is an accepted
+ * limit of the degraded no-key path, not of the app as a whole.
  */
 export async function interpretTripRequest(prompt: string): Promise<Interpretation> {
   const hasKey = Boolean(
     process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN,
   );
   if (!hasKey) {
-    const input = heuristicParse(prompt);
     return {
-      input,
+      input: heuristicParse(prompt),
       source: "heuristic",
       notes:
         "Read your request with a keyword parser — set ANTHROPIC_API_KEY for Claude to interpret it properly.",
+      resolvedCities: [],
+      unresolvedCityNames: [],
     };
   }
 
@@ -93,35 +119,49 @@ export async function interpretTripRequest(prompt: string): Promise<Interpretati
     messages: [
       {
         role: "user",
-        content: `Today is ${todayISO()}.
-
-City catalogue (id — name, country):
-${catalogue()}
-
-Traveller's request:
-${prompt}`,
+        content: `Today is ${todayISO()}.\n\nTraveller's request:\n${prompt}`,
       },
     ],
   });
 
   const parsed = response.parsed_output;
   if (!parsed) {
-    const input = heuristicParse(prompt);
     return {
-      input,
+      input: heuristicParse(prompt),
       source: "heuristic",
       notes: "Claude's reply did not match the expected shape, so this is a keyword reading of your request.",
+      resolvedCities: [],
+      unresolvedCityNames: [],
     };
   }
 
-  // The schema constrains shape, not sense. Dates and ordering still get
-  // validated here before anything reaches the planner.
+  // Resolve every named city in parallel — geocode + cache/generate as
+  // needed. A city that fails is dropped rather than failing the whole
+  // request; the rest of a multi-city trip can still be worth building.
+  const settled = await Promise.allSettled(
+    parsed.cities.map((c) => resolveCity(c.name, c.country)),
+  );
+
+  const resolvedCities: ResolvedCity[] = [];
+  const unresolvedCityNames: string[] = [];
+  settled.forEach((result, i) => {
+    if (result.status === "fulfilled") resolvedCities.push(result.value);
+    else unresolvedCityNames.push(parsed.cities[i].name);
+  });
+
+  const cityIds = resolvedCities.map((r) => r.city.id);
+
+  let notes = parsed.notes;
+  if (unresolvedCityNames.length > 0) {
+    notes += ` (Couldn't place ${unresolvedCityNames.join(", ")} — left out of the trip.)`;
+  }
+
   return {
     input: sanitize(
       {
         startDate: parsed.startDate,
         endDate: parsed.endDate,
-        cityIds: parsed.cityIds,
+        cityIds,
         interests: parsed.interests,
         pace: parsed.pace,
         travelerStyle: parsed.travelerStyle,
@@ -129,7 +169,9 @@ ${prompt}`,
       prompt,
     ),
     source: "claude",
-    notes: parsed.notes,
+    notes,
+    resolvedCities,
+    unresolvedCityNames,
   };
 }
 
@@ -165,7 +207,9 @@ export function sanitize(candidate: TripInput, prompt = ""): TripInput {
 // Keyword fallback
 //
 // Deliberately simple: find city names, find a duration, find interest words.
-// It exists so the app works with no API key at all.
+// It exists so the app works with no API key at all. Unlike the Claude path,
+// this only ever matches the static catalogue — it has no way to geocode or
+// generate a city it doesn't already know.
 // ---------------------------------------------------------------------------
 
 const INTEREST_WORDS: Record<Category, string[]> = {
