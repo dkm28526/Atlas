@@ -2,6 +2,7 @@
 
 import { useCallback, useMemo, useState } from "react";
 
+import AdventureMap from "@/components/AdventureMap";
 import Globe, { type GlobeHop, type GlobeStop } from "@/components/Globe";
 import ItineraryList from "@/components/ItineraryList";
 import TripForm from "@/components/TripForm";
@@ -32,6 +33,7 @@ export default function Page() {
   const [note, setNote] = useState<string | null>(null);
   const [requestError, setRequestError] = useState<string | null>(null);
   const [setupOpen, setSetupOpen] = useState(true);
+  const [mapStyle, setMapStyle] = useState<"globe" | "adventure">("globe");
 
   // The engine is pure, so a plan is just derived state — every adjustment
   // re-plans instantly with no round trip.
@@ -99,6 +101,15 @@ export default function Page() {
     },
     [itinerary],
   );
+
+  const switchMapStyle = useCallback((style: "globe" | "adventure") => {
+    setMapStyle((prev) => {
+      // A fresh restart each time you switch views reads better than
+      // resuming mid-dwell on whatever leg the other view had reached.
+      if (prev !== style) setReplayKey((k) => k + 1);
+      return style;
+    });
+  }, []);
 
   const askClaude = useCallback(async () => {
     if (prompt.trim().length < 3 || thinking) return;
@@ -198,15 +209,48 @@ export default function Page() {
         </div>
       </div>
 
-      {/* ---------------- Globe ---------------- */}
+      {/* ---------------- Map / Globe ---------------- */}
       <div className="relative h-1/2 min-h-0 w-full lg:h-full lg:flex-1">
-        <Globe
-          stops={stops}
-          hops={globeHops}
-          replayKey={replayKey}
-          focusIndex={focusIndex}
-          onSelectStop={(id) => setFocusedCityId((prev) => (prev === id ? null : id))}
-        />
+        {mapStyle === "globe" ? (
+          <Globe
+            stops={stops}
+            hops={globeHops}
+            replayKey={replayKey}
+            focusIndex={focusIndex}
+            onSelectStop={(id) => setFocusedCityId((prev) => (prev === id ? null : id))}
+          />
+        ) : (
+          <AdventureMap
+            stops={stops}
+            hops={globeHops}
+            replayKey={replayKey}
+            focusIndex={focusIndex}
+            onSelectStop={(id) => setFocusedCityId((prev) => (prev === id ? null : id))}
+          />
+        )}
+
+        {/* View switch */}
+        <div className="pointer-events-none absolute right-4 top-4 flex gap-1 rounded-lg border border-edge bg-hull/70 p-1 backdrop-blur">
+          {(
+            [
+              { id: "globe", label: "🌍 Globe" },
+              { id: "adventure", label: "🗺️ Map" },
+            ] as const
+          ).map((option) => (
+            <button
+              key={option.id}
+              onClick={() => switchMapStyle(option.id)}
+              aria-pressed={mapStyle === option.id}
+              className={`pointer-events-auto rounded px-2.5 py-1.5 text-[11px] transition ${
+                mapStyle === option.id
+                  ? "bg-route/20 text-route"
+                  : "text-inkDim hover:text-ink"
+              }`}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
 
         {/* Overlay: route summary, legend, replay */}
         <div className="pointer-events-none absolute left-4 top-4 flex flex-col gap-2">
@@ -242,7 +286,7 @@ export default function Page() {
             >
               ↻ Replay
             </button>
-            {focusedCityId && (
+            {mapStyle === "globe" && focusedCityId && (
               <button
                 onClick={() => setFocusedCityId(null)}
                 className="rounded-lg border border-edge bg-hull/70 px-2.5 py-1.5 text-[11px] text-inkDim backdrop-blur transition hover:border-route/50 hover:text-ink"
@@ -254,13 +298,26 @@ export default function Page() {
         </div>
 
         <div className="pointer-events-none absolute bottom-4 left-4 flex gap-3 text-[10px] text-inkDim">
-          <span className="flex items-center gap-1.5">
-            <span className="h-0.5 w-5 rounded bg-[#5ad2ff]" /> flight
-          </span>
-          <span className="flex items-center gap-1.5">
-            <span className="h-0.5 w-5 rounded bg-[#f0abfc]" /> train
-          </span>
-          <span>· drag to spin, scroll to zoom, click a city</span>
+          {mapStyle === "globe" ? (
+            <>
+              <span className="flex items-center gap-1.5">
+                <span className="h-0.5 w-5 rounded bg-[#5ad2ff]" /> flight
+              </span>
+              <span className="flex items-center gap-1.5">
+                <span className="h-0.5 w-5 rounded bg-[#f0abfc]" /> train
+              </span>
+              <span>· drag to spin, scroll to zoom, click a city</span>
+            </>
+          ) : (
+            <span className="flex items-center gap-1.5">
+              <span className="flex gap-0.5">
+                <span className="h-1 w-1 rounded-full bg-[#a02020]" />
+                <span className="h-1 w-1 rounded-full bg-[#a02020]" />
+                <span className="h-1 w-1 rounded-full bg-[#a02020]" />
+              </span>
+              the route, dotted · click a city
+            </span>
+          )}
         </div>
       </div>
     </main>

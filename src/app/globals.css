@@ -58,3 +58,21 @@ body {
 .rise {
   animation: rise 0.35s ease-out both;
 }
+
+/* Adventure-map view — dark mount around the parchment so the map reads like
+   a museum-mounted piece rather than floating on the void background. */
+.map-ink {
+  background: radial-gradient(ellipse at center, #1c140c 0%, #0b0804 100%);
+}
+
+.map-label {
+  font-family: var(--font-vintage), ui-serif, Georgia, serif;
+  font-size: 13px;
+  letter-spacing: 0.01em;
+}
+
+.map-label-sub {
+  font-family: var(--font-vintage), ui-serif, Georgia, serif;
+  font-size: 9px;
+  opacity: 0.85;
+}
