@@ -91,24 +91,55 @@ library, because the sequential draw-the-route animation is the point.
   close as Tokyo and Kyoto both keep their labels.
 - Colour marks the mode: cyan for flights, pink for trains.
 
+## The adventure map
+
+`src/components/AdventureMap.tsx` — a second view, toggled alongside the
+globe: a sepia parchment map with a dotted red line and a plane icon tracing
+each hop, in the Indiana-Jones-travel-montage style.
+
+The land is real Natural Earth 110m coastline data (via `world-atlas`), not a
+decorative image — `scripts/build-worldmap.mjs` projects it equirectangular
+and bakes the result to a static SVG path (`src/lib/worldmap-data.ts`) ahead
+of time, along with the exact projection formula used to produce it. That
+means the browser ships one path string and some arithmetic rather than
+`d3-geo`/`topojson-client` (both stay devDependencies), and city markers are
+guaranteed to land in the right place because the component projects lon/lat
+with that same baked formula.
+
+The map zooms to the route's own bounding box instead of always showing the
+whole planet — since everything lives in one baked coordinate space, "zoom"
+is just picking a smaller `viewBox`, and dot size, stroke widths, marker
+radii, and label text all scale correctly for free as SVG user-space units.
+The dotted line itself is sampled at even arc-length spacing along a bowed
+curve (not evenly in `t`, which would bunch dots on the bend) and reveals
+dot-by-dot on the same draw-the-route pacing as the globe.
+
+Known limitation: a flat map can't show the literal shortest path the way the
+3D globe's great-circle arcs can, so a hop that spans roughly half the globe
+(say, Tokyo to a US city) draws a straight line across whichever side of the
+map is visible rather than wrapping the antimeridian — a cosmetic tradeoff of
+the genre (the films' own maps never show that kind of route either).
+
 ## Layout
 
 ```
 src/
   app/            layout, page, globals.css, api/plan (free-text route)
-  components/     Globe, TripForm, ItineraryList
+  components/     Globe, AdventureMap, TripForm, ItineraryList
   lib/
-    types.ts      domain model
-    cities.ts     seed data — 23 cities, ~150 activities, 69 lodgings
-    geo.ts        haversine, great-circle interpolation, hop modes
-    route.ts      city ordering
-    allocate.ts   night allocation
-    pack.ts       day packing
-    itinerary.ts  orchestration, lodging ranking, warnings
-    llm.ts        Claude (structured outputs) + keyword fallback
-    dates.ts      ISO date helpers
+    types.ts            domain model
+    cities.ts            seed data — 23 cities, ~150 activities, 69 lodgings
+    geo.ts                haversine, great-circle interpolation, hop modes
+    route.ts              city ordering
+    allocate.ts           night allocation
+    pack.ts               day packing
+    itinerary.ts          orchestration, lodging ranking, warnings
+    llm.ts                Claude (structured outputs) + keyword fallback
+    dates.ts              ISO date helpers
+    worldmap-data.ts      generated — baked land path + projection (do not edit)
 scripts/
-  plan-smoke.ts   text-mode itinerary printer
+  plan-smoke.ts         text-mode itinerary printer
+  build-worldmap.mjs    regenerates worldmap-data.ts from world-atlas
 ```
 
 ## Known gaps
