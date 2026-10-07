@@ -2,6 +2,8 @@ import Anthropic from "@anthropic-ai/sdk";
 import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
 import { z } from "zod";
 
+import { AiDisabledError, aiEnabled } from "./ai";
+import { fetchCityGuide } from "./citySources";
 import { CATEGORIES } from "./types";
 import type { Activity, City, Lodging } from "./types";
 
@@ -90,7 +92,10 @@ generic. This is research for a second pass that will structure it, not the
 final output.`;
 
 const STRUCTURE_SYSTEM = `Turn the research notes below into a structured city profile for a trip
-planner. Match the voice of a sharp local friend, not tourism-board copy —
+planner. The notes may be an excerpt from a travel guide that lists far more
+than is needed — choose the strongest six to ten things to do rather than the
+first ones listed, and pick lodging from the places the notes actually name.
+Match the voice of a sharp local friend, not tourism-board copy —
 every blurb should say something a traveller couldn't already guess from the
 name. Use the neighbourhood field for real clustering: two things in the same
 area should actually share a neighbourhood name. If the research notes are
@@ -100,58 +105,48 @@ rather than inventing false specificity.`;
 export class CityGenerationError extends Error {}
 
 /**
- * Research a city via live web search, then structure the result into the
- * app's City/Activity/Lodging shape.
+ * Build a city profile in the app's City/Activity/Lodging shape.
  *
- * Two calls rather than one: combining an open-ended web-search tool loop
- * with a forced structured-output format in a single call isn't a pattern
- * either SDK's docs vouch for, so this keeps them separate — research
- * produces plain text, a second, tool-free call extracts it into schema.
- * Costs one extra round trip; buys predictability on a code path with no
- * second chance (a bad generation becomes a permanently cached bad city).
+ * The research comes from wherever is cheapest. A Wikivoyage article, when
+ * one exists, is free and already holds the sights and lodging — then the
+ * only Claude call is the structuring one below. Web-search research is the
+ * fallback for places Wikivoyage doesn't cover well enough, and costs a
+ * second, much more expensive call.
+ *
+ * Research and structuring stay separate either way: combining an
+ * open-ended web-search tool loop with a forced structured-output format in
+ * a single call isn't a pattern either SDK's docs vouch for, and a bad
+ * generation becomes a permanently cached bad city.
  */
 export async function generateCityProfile(
   name: string,
   country: string | null,
   coords: { lat: number; lon: number },
 ): Promise<{ city: Omit<City, "id">; activities: Omit<Activity, "id" | "cityId">[]; lodging: Omit<Lodging, "id" | "cityId">[] }> {
-  const client = new Anthropic();
   const place = country ? `${name}, ${country}` : name;
+  if (!aiEnabled()) {
+    throw new AiDisabledError(
+      `${place} isn't in the catalogue or the cache yet, and adding a new city needs AI, which is switched off (ATLAS_AI).`,
+    );
+  }
+  const client = new Anthropic();
   const t0 = Date.now();
 
-  const research = await client.messages.create({
-    model: "claude-opus-5",
-    max_tokens: 4000,
-    system: RESEARCH_SYSTEM,
-    // Capped effort matters here more than anywhere else in the app: this
-    // call was timed at ~2.5 minutes at Opus 5's default (high, adaptive
-    // thinking, uncapped) — fine for a one-off terminal test, not for a
-    // live "search online" button, and likely past a serverless function's
-    // timeout once this deploys. Low effort plus fewer search rounds cuts
-    // that dramatically; the structuring call already runs at low.
-    output_config: { effort: "low" },
-    tools: [{ type: "web_search_20260209", name: "web_search", max_uses: 2 }],
-    messages: [{ role: "user", content: `Research ${place} for the trip planner.` }],
-  });
+  const guide = await fetchCityGuide(name, country);
+  const researchText = guide
+    ? `Source: Wikivoyage, "${guide.title}"\n\n${guide.notes}`
+    : await researchViaWebSearch(client, place);
 
   const t1 = Date.now();
-  console.log(`[generateCity] research call: ${t1 - t0}ms, ${research.content.length} blocks`);
-
-  const researchText = research.content
-    .filter((block): block is Anthropic.TextBlock => block.type === "text")
-    .map((block) => block.text)
-    .join("\n\n")
-    .trim();
-
-  if (!researchText) {
-    throw new CityGenerationError(`No usable research came back for ${place}.`);
-  }
+  console.log(
+    `[generateCity] research via ${guide ? "wikivoyage (free)" : "web search"}: ${t1 - t0}ms, ${researchText.length} chars`,
+  );
 
   const structured = await client.messages.parse({
-    model: "claude-opus-5",
+    model: "claude-haiku-4-5",
     max_tokens: 4000,
     system: STRUCTURE_SYSTEM,
-    output_config: { format: zodOutputFormat(CityProfileSchema), effort: "low" },
+    output_config: { format: zodOutputFormat(CityProfileSchema) },
     messages: [
       {
         role: "user",
@@ -161,7 +156,9 @@ export async function generateCityProfile(
   });
 
   const t2 = Date.now();
-  console.log(`[generateCity] structure call: ${t2 - t1}ms`);
+  console.log(
+    `[generateCity] structure call: ${t2 - t1}ms, ${structured.usage.input_tokens} in / ${structured.usage.output_tokens} out tokens`,
+  );
 
   const parsed = structured.parsed_output;
   if (!parsed) {
@@ -182,4 +179,32 @@ export async function generateCityProfile(
     activities: parsed.activities,
     lodging: parsed.lodging,
   };
+}
+
+/**
+ * The expensive path: have Claude research the city with live web search.
+ * Only reached when Wikivoyage has no usable article for the place.
+ */
+async function researchViaWebSearch(client: Anthropic, place: string): Promise<string> {
+  const research = await client.messages.create({
+    model: "claude-haiku-4-5",
+    max_tokens: 4000,
+    system: RESEARCH_SYSTEM,
+    // Haiku 4.5 takes the basic web search tool (the 20260209 variant needs
+    // a Sonnet/Opus-tier model) and has no effort setting. The cap on search
+    // rounds is what keeps this inside a serverless function's timeout.
+    tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 2 }],
+    messages: [{ role: "user", content: `Research ${place} for the trip planner.` }],
+  });
+
+  const researchText = research.content
+    .filter((block): block is Anthropic.TextBlock => block.type === "text")
+    .map((block) => block.text)
+    .join("\n\n")
+    .trim();
+
+  if (!researchText) {
+    throw new CityGenerationError(`No usable research came back for ${place}.`);
+  }
+  return researchText;
 }

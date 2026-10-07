@@ -24,7 +24,13 @@ the world:
 
 ```bash
 echo 'ANTHROPIC_API_KEY=sk-ant-...' >> .env.local
+echo 'ATLAS_AI=on' >> .env.local
 ```
+
+AI stays off unless `ATLAS_AI=on` is set, even with a key present
+(`src/lib/ai.ts`), so development doesn't spend money by accident. With it
+off, seeded and already-cached cities work as normal and a brand-new city
+is refused with a clear message.
 
 The key needs to be scoped to a specific workspace (Console → Settings →
 API Keys → pick a workspace, Default is fine) — an org-level key with no
@@ -148,18 +154,26 @@ curated one everywhere, including the globe and the adventure map.
    asked for this city before.
 3. Neither — geocode via OpenStreetMap's Nominatim (free, no key; also
    doubles as validation — a name that doesn't geocode to anywhere real
-   gets rejected rather than silently built into a trip), then generate via
-   two Claude calls: one researches the city with live web search
-   (`src/lib/generateCity.ts`), the second structures that research into the
-   same City/Activity/Lodging shape the hand-written rows use. The result is
-   written through to the cache and merged into the live registry.
+   gets rejected rather than silently built into a trip), then gather the
+   research from the cheapest source that has it:
+   - **Wikivoyage, free** (`src/lib/citySources.ts`) — the city's travel-guide
+     article already lists the sights and has lodging sorted into budget /
+     mid-range / splurge. When it exists, Claude does no research at all.
+   - **Claude with live web search** — only when Wikivoyage has no usable
+     article (missing, ambiguous, wrong country, or no lodging section).
 
-**This is genuinely slow — by design, not by bug.** A cache miss means two
-sequential Claude calls, one of them doing real web research: measured at
-60–110 seconds depending on the city. That's the cost of it being *actually*
-researched rather than guessed from training data. It only happens once per
-city, ever — every request after, from anyone, is a cache hit in well under
-a second. The UI says this plainly rather than pretending to be fast.
+   Either way, one Claude call (`src/lib/generateCity.ts`) then organises
+   that research into the same City/Activity/Lodging shape the hand-written
+   rows use. The result is written through to the cache and merged into the
+   live registry.
+
+**A cache miss is slow, and slowest on the fallback path.** With a
+Wikivoyage article it is one Claude call over about 6k tokens of notes.
+Without one it is two sequential calls, one doing real web research:
+measured at 60–110 seconds depending on the city. Either way it only happens
+once per city, ever — every request after, from anyone, is a cache hit in
+well under a second. The server log says which path a city took and how many
+tokens the structuring call used.
 
 **The cache backend** auto-selects based on what's configured
 (`src/lib/cache.ts`), same "upgrade automatically when credentials exist"
@@ -209,7 +223,8 @@ src/
     itinerary.ts          orchestration, lodging ranking, warnings
     llm.ts                Claude (structured outputs) + keyword fallback
     resolveCity.ts         any-city resolution: registry → cache → generate
-    generateCity.ts         the Claude research → structure pipeline
+    generateCity.ts         research (free source, else Claude) → structure
+    citySources.ts          free Wikivoyage city research, no key
     geocode.ts              free Nominatim geocoding, no key
     cache.ts                Upstash/file cache, auto-selected
     dates.ts              ISO date helpers

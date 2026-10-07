@@ -2,6 +2,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
 import { z } from "zod";
 
+import { aiEnabled } from "./ai";
 import { CITIES, getCity } from "./cities";
 import { addDays, isValidISO, todayISO } from "./dates";
 import { resolveCity, UnknownCityError, type ResolvedCity } from "./resolveCity";
@@ -86,22 +87,19 @@ function catalogueNames(): string {
 /**
  * Turn free text into a trip brief.
  *
- * Uses Claude when credentials are available and falls back to a keyword
- * parser otherwise, so the app is fully usable with no API key — the same
- * shape of answer either way. The keyword fallback only matches the static
+ * Uses Claude when AI is switched on (see ai.ts) and falls back to a
+ * keyword parser otherwise, so the app is fully usable with no API spend —
+ * the same shape of answer either way. The keyword fallback only matches the static
  * catalogue (it has no way to geocode or generate), which is an accepted
  * limit of the degraded no-key path, not of the app as a whole.
  */
 export async function interpretTripRequest(prompt: string): Promise<Interpretation> {
-  const hasKey = Boolean(
-    process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN,
-  );
-  if (!hasKey) {
+  if (!aiEnabled()) {
     return {
       input: heuristicParse(prompt),
       source: "heuristic",
       notes:
-        "Read your request with a keyword parser — set ANTHROPIC_API_KEY for Claude to interpret it properly.",
+        "Read your request with a keyword parser — AI is switched off (set ATLAS_AI=on with an API key for Claude to interpret it).",
       resolvedCities: [],
       unresolvedCityNames: [],
     };
@@ -109,12 +107,11 @@ export async function interpretTripRequest(prompt: string): Promise<Interpretati
 
   const client = new Anthropic();
   const response = await client.messages.parse({
-    model: "claude-opus-5",
+    model: "claude-haiku-4-5",
     max_tokens: 4000,
     system: SYSTEM,
     output_config: {
       format: zodOutputFormat(TripRequestSchema),
-      effort: "low",
     },
     messages: [
       {

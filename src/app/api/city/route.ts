@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 
+import { AiDisabledError } from "@/lib/ai";
 import { resolveCity, UnknownCityError } from "@/lib/resolveCity";
 
 export const runtime = "nodejs";
@@ -40,6 +41,9 @@ export async function POST(request: Request) {
   } catch (error) {
     if (error instanceof UnknownCityError) {
       return NextResponse.json({ error: error.message }, { status: 404 });
+    }
+    if (error instanceof AiDisabledError) {
+      return NextResponse.json({ error: error.message }, { status: 503 });
     }
     console.error("[/api/city]", error);
     return NextResponse.json(
